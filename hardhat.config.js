@@ -34,7 +34,7 @@ module.exports = {
   paths: {
     artifacts: "./artifacts-zk",
     cache: "./cache-zk",
-    sources: "./contracts",
+    sources: "./contracts-simple",
     tests: "./test",
   },
   solidity: {
