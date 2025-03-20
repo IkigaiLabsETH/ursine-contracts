@@ -1,76 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.0;
 
-import "@thirdweb-dev/contracts/base/ERC721DelayedReveal.sol";
+import "./GenesisNFTStorage.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-import "@openzeppelin/contracts/access/AccessControl.sol";
-import "./interfaces/IBuybackEngine.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/token/common/ERC2981.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 
 /**
- * @title Ikigai Genesis NFT Collection
- * @notice First NFT collection that accepts BERA for minting and rewards IKIGAI
- * @dev Extends ERC721DelayedReveal with vesting rewards
+ * @title GenesisNFTLogic
+ * @notice Implementation contract for GenesisNFT with upgradeable pattern
+ * @dev Implements UUPS upgradeable pattern with ERC721 standard
  */
-contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessControl {
-    using SafeERC20 for IERC20;
-    using SafeMath for uint256;
-
-    // Access control roles
-    bytes32 public constant TREASURY_ROLE = keccak256("TREASURY_ROLE");
-    bytes32 public constant WHITELIST_MANAGER_ROLE = keccak256("WHITELIST_MANAGER_ROLE");
-    bytes32 public constant PRICE_MANAGER_ROLE = keccak256("PRICE_MANAGER_ROLE");
-    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
-    bytes32 public constant METADATA_ROLE = keccak256("METADATA_ROLE");
-    
-    // Token references
-    IERC20 public immutable beraToken;
-    IERC20 public immutable ikigaiToken;
-    IBuybackEngine public buybackEngine;
-    
-    // Treasury and reward parameters
-    address public treasuryAddress;
-    uint256 public constant TREASURY_SHARE = 6000; // 60% to treasury
-    uint256 public constant REWARDS_SHARE = 4000;  // 40% to rewards
-    
-    // Whitelist and pricing
-    mapping(address => bool) public beraHolderWhitelist;
-    mapping(address => bool) public generalWhitelist;
-    uint256 public beraHolderPrice;
-    uint256 public whitelistPrice;
-    uint256 public publicPrice;
-    
-    // Vesting parameters
-    uint256 public constant VESTING_DURATION = 90 days;
-    uint256 public constant VESTING_CLIFF = 7 days;
-    
-    // Reward tracking with enhanced security
-    struct RewardInfo {
-        uint256 totalAmount;
-        uint256 claimedAmount;
-        uint256 vestingStart;
-        uint256 lastClaimTime;
-    }
-    mapping(address => RewardInfo) public rewards;
-    
-    // Sale state
-    enum SalePhase { NotStarted, BeraHolders, Whitelist, Public, Ended }
-    SalePhase public currentPhase = SalePhase.NotStarted;
-
-    // Circuit breaker
-    bool public emergencyMode = false;
-    
-    // Rate limiting
-    uint256 public claimCooldown = 1 days;
-    uint256 public maxClaimAmount;
-    uint256 public claimRateLimit;
-    uint256 public totalClaimedInWindow;
-    uint256 public claimWindowStart;
-    uint256 public claimWindowDuration = 1 days;
-    
+contract GenesisNFTLogic is 
+    GenesisNFTStorage, 
+    ERC721, 
+    ERC721Enumerable, 
+    ERC721URIStorage,
+    ERC2981,
+    ReentrancyGuard, 
+    Pausable,
+    UUPSUpgradeable 
+{
     // Events
     event RewardAdded(address indexed user, uint256 amount);
     event RewardClaimed(address indexed user, uint256 amount);
@@ -81,20 +35,24 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
     event EmergencyModeChanged(bool enabled);
     event ClaimLimitsUpdated(uint256 cooldown, uint256 maxAmount, uint256 rateLimit, uint256 windowDuration);
     event BatchMinted(address indexed to, uint256 startTokenId, uint256 quantity);
-    
-    // Add these state variables
-    uint256 public maxSupply;
-    uint256 public maxMintPerWallet;
-    uint256 public maxMintPerTx = 20;
-    mapping(address => uint256) public mintedPerWallet;
-    
-    // Add metadata and reveal features
-    mapping(uint256 => string) private _tokenURIs;
-    bool public revealed = false;
-    string public notRevealedURI;
-    string public baseURI;
-    
-    constructor(
+    event ContractUpgraded(address newImplementation);
+
+    /**
+     * @notice Initializer function (replaces constructor for upgradeable contracts)
+     * @param _defaultAdmin Default admin address
+     * @param _name Token name
+     * @param _symbol Token symbol
+     * @param _royaltyRecipient Royalty recipient address
+     * @param _royaltyBps Royalty basis points
+     * @param _beraToken BERA token address
+     * @param _ikigaiToken IKIGAI token address
+     * @param _treasuryAddress Treasury address
+     * @param _buybackEngine Buyback engine address
+     * @param _beraHolderPrice Price for BERA holders
+     * @param _whitelistPrice Price for whitelisted users
+     * @param _publicPrice Public sale price
+     */
+    function initialize(
         address _defaultAdmin,
         string memory _name,
         string memory _symbol,
@@ -107,20 +65,47 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
         uint256 _beraHolderPrice,
         uint256 _whitelistPrice,
         uint256 _publicPrice
-    ) ERC721DelayedReveal(_defaultAdmin, _name, _symbol, _royaltyRecipient, _royaltyBps) {
+    ) public initializer {
         require(_beraToken != address(0), "Invalid BERA token");
         require(_ikigaiToken != address(0), "Invalid IKIGAI token");
         require(_treasuryAddress != address(0), "Invalid treasury");
         require(_buybackEngine != address(0), "Invalid buyback engine");
         
+        // Initialize ERC721
+        ERC721_init(_name, _symbol);
+        
+        // Set token metadata
+        name = _name;
+        symbol = _symbol;
+        
+        // Set token references
         beraToken = IERC20(_beraToken);
         ikigaiToken = IERC20(_ikigaiToken);
         treasuryAddress = _treasuryAddress;
         buybackEngine = IBuybackEngine(_buybackEngine);
         
+        // Set pricing
         beraHolderPrice = _beraHolderPrice;
         whitelistPrice = _whitelistPrice;
         publicPrice = _publicPrice;
+        
+        // Setup royalties
+        royaltyRecipient = _royaltyRecipient;
+        royaltyBps = _royaltyBps;
+        _setDefaultRoyalty(_royaltyRecipient, _royaltyBps);
+        
+        // Set default sale phase
+        currentPhase = SalePhase.NotStarted;
+        
+        // Set claim rate limits
+        claimCooldown = 1 days;
+        maxClaimAmount = 1000 * 10**18; // 1000 tokens max claim per user
+        claimRateLimit = 10000 * 10**18; // 10,000 tokens max per day across all users
+        claimWindowDuration = 1 days;
+        claimWindowStart = block.timestamp;
+        
+        // Set minting limits
+        maxMintPerTx = 20;
         
         // Setup AccessControl roles
         _setupRole(DEFAULT_ADMIN_ROLE, _defaultAdmin);
@@ -129,11 +114,23 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
         _setupRole(PRICE_MANAGER_ROLE, _defaultAdmin);
         _setupRole(EMERGENCY_ROLE, _defaultAdmin);
         _setupRole(METADATA_ROLE, _defaultAdmin);
-        
-        // Set initial claim rate limits - adjust based on tokenomics
-        maxClaimAmount = 1000 * 10**18; // 1000 tokens max claim per user
-        claimRateLimit = 10000 * 10**18; // 10,000 tokens max per day across all users
-        claimWindowStart = block.timestamp;
+        _setupRole(UPGRADE_ROLE, _defaultAdmin);
+    }
+    
+    /**
+     * @notice Initialize ERC721 separately
+     * @dev This function enables proper initialization of the ERC721 implementation
+     */
+    function ERC721_init(string memory _name, string memory _symbol) internal {
+        __ERC721_init(_name, _symbol);
+    }
+    
+    /**
+     * @notice Authorization function for upgrades
+     * @dev Required by UUPSUpgradeable
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADE_ROLE) {
+        emit ContractUpgraded(newImplementation);
     }
     
     /**
@@ -170,37 +167,22 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
         uint256 beraBalance = beraToken.balanceOf(msg.sender);
         require(beraBalance >= totalPrice, "Insufficient BERA balance");
         
-        // Transfer BERA from user
-        beraToken.safeTransferFrom(msg.sender, address(this), totalPrice);
-        
-        // Calculate shares
-        uint256 treasuryAmount = totalPrice.mul(TREASURY_SHARE).div(10000);
-        uint256 rewardsAmount = totalPrice.sub(treasuryAmount);
-        
-        // Send treasury share
-        beraToken.safeTransfer(treasuryAddress, treasuryAmount);
-        emit TreasuryPayment(treasuryAmount);
-        
-        // Add rewards (vested IKIGAI)
-        if (rewardsAmount > 0) {
-            // Convert BERA value to IKIGAI reward amount
-            uint256 ikigaiRewardAmount = convertBeraToIkigaiReward(rewardsAmount);
-            require(ikigaiRewardAmount > 0, "Invalid reward calculation");
-            
-            // Record reward
-            rewards[msg.sender].totalAmount = rewards[msg.sender].totalAmount.add(ikigaiRewardAmount);
-            if (rewards[msg.sender].vestingStart == 0) {
-                rewards[msg.sender].vestingStart = block.timestamp;
-            }
-            
-            emit RewardAdded(msg.sender, ikigaiRewardAmount);
-        }
+        // Process the payment and add rewards
+        processPaymentAndRewards(totalPrice, msg.sender);
         
         // Mint NFT
-        _safeMint(msg.sender, _quantity);
+        uint256 startTokenId = _currentIndex;
+        for (uint256 i = 0; i < _quantity; i++) {
+            uint256 tokenId = _currentIndex;
+            _safeMint(msg.sender, tokenId);
+            _currentIndex++;
+        }
         
         // Update minted counter
         mintedPerWallet[msg.sender] = mintedPerWallet[msg.sender].add(_quantity);
+        
+        // Emit batch minted event
+        emit BatchMinted(msg.sender, startTokenId, _quantity);
     }
     
     /**
@@ -286,9 +268,39 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
      * @return IKIGAI reward amount
      */
     function convertBeraToIkigaiReward(uint256 _beraAmount) public view returns (uint256) {
-        // This implementation depends on your tokenomics
-        // Consider using the buyback engine for real-time pricing
+        // Use buyback engine for real-time pricing
         return buybackEngine.getIkigaiAmountForBera(_beraAmount);
+    }
+
+    /**
+     * @notice Process payment and rewards
+     * @param _totalPrice Total price in BERA
+     * @param _recipient Recipient address
+     */
+    function processPaymentAndRewards(uint256 _totalPrice, address _recipient) internal {
+        // Transfer BERA from user
+        beraToken.safeTransferFrom(_recipient, address(this), _totalPrice);
+        
+        // Calculate shares
+        uint256 treasuryAmount = _totalPrice.mul(TREASURY_SHARE).div(10000);
+        uint256 rewardsAmount = _totalPrice.sub(treasuryAmount);
+        
+        // Send treasury share
+        beraToken.safeTransfer(treasuryAddress, treasuryAmount);
+        emit TreasuryPayment(treasuryAmount);
+        
+        // Process rewards
+        if (rewardsAmount > 0) {
+            uint256 ikigaiRewardAmount = convertBeraToIkigaiReward(rewardsAmount);
+            require(ikigaiRewardAmount > 0, "Invalid reward calculation");
+            
+            rewards[_recipient].totalAmount = rewards[_recipient].totalAmount.add(ikigaiRewardAmount);
+            if (rewards[_recipient].vestingStart == 0) {
+                rewards[_recipient].vestingStart = block.timestamp;
+            }
+            
+            emit RewardAdded(_recipient, ikigaiRewardAmount);
+        }
     }
     
     /**
@@ -379,8 +391,6 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
      * @return Total unclaimed rewards
      */
     function getTotalUnclaimedRewards() public view returns (uint256) {
-        // This is a simplified implementation
-        // In production, you would track this more efficiently
         return ikigaiToken.balanceOf(address(this));
     }
     
@@ -459,51 +469,10 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
     }
     
     /**
-     * @notice Grant a role to an account
-     * @param _role Role to grant
-     * @param _account Account to receive the role
+     * @notice Gets current price for user
+     * @param _user User address
+     * @return Current price
      */
-    function grantRole(bytes32 _role, address _account) 
-        public 
-        override 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
-    {
-        super.grantRole(_role, _account);
-    }
-
-    // Gas-optimized batch minting
-    function batchMint(uint256 _quantity) external nonReentrant whenNotPaused {
-        require(!emergencyMode, "Emergency mode: minting disabled");
-        require(currentPhase != SalePhase.NotStarted && currentPhase != SalePhase.Ended, "Sale not active");
-        require(_quantity > 0, "Invalid quantity");
-        require(_quantity <= maxMintPerTx, "Exceeds max mint per transaction");
-        
-        // Check mint limits
-        require(totalSupply().add(_quantity) <= maxSupply, "Exceeds max supply");
-        require(mintedPerWallet[msg.sender].add(_quantity) <= maxMintPerWallet, "Exceeds wallet limit");
-        
-        // Calculate total price
-        uint256 totalPrice = getCurrentPriceForUser(msg.sender).mul(_quantity);
-        require(totalPrice > 0, "Price calculation error");
-        
-        // Transfer BERA from user
-        beraToken.safeTransferFrom(msg.sender, address(this), totalPrice);
-        
-        // Process payment and rewards just once
-        processPaymentAndRewards(totalPrice, msg.sender);
-        
-        // Mint NFTs efficiently
-        uint256 startTokenId = _currentIndex;
-        _safeMint(msg.sender, _quantity);
-        
-        // Update minted counter
-        mintedPerWallet[msg.sender] = mintedPerWallet[msg.sender].add(_quantity);
-        
-        // Emit an event with range
-        emit BatchMinted(msg.sender, startTokenId, _quantity);
-    }
-
-    // Helper to get current price for user
     function getCurrentPriceForUser(address _user) public view returns (uint256) {
         if (currentPhase == SalePhase.BeraHolders) {
             if (beraHolderWhitelist[_user]) return beraHolderPrice;
@@ -516,79 +485,121 @@ contract GenesisNFT is ERC721DelayedReveal, ReentrancyGuard, Pausable, AccessCon
         revert("Not eligible to mint");
     }
 
-    // Helper to process payment and rewards
-    function processPaymentAndRewards(uint256 _totalPrice, address _recipient) internal {
-        // Calculate shares
-        uint256 treasuryAmount = _totalPrice.mul(TREASURY_SHARE).div(10000);
-        uint256 rewardsAmount = _totalPrice.sub(treasuryAmount);
-        
-        // Send treasury share
-        beraToken.safeTransfer(treasuryAddress, treasuryAmount);
-        emit TreasuryPayment(treasuryAmount);
-        
-        // Process rewards
-        if (rewardsAmount > 0) {
-            uint256 ikigaiRewardAmount = convertBeraToIkigaiReward(rewardsAmount);
-            require(ikigaiRewardAmount > 0, "Invalid reward calculation");
-            
-            rewards[_recipient].totalAmount = rewards[_recipient].totalAmount.add(ikigaiRewardAmount);
-            if (rewards[_recipient].vestingStart == 0) {
-                rewards[_recipient].vestingStart = block.timestamp;
-            }
-            
-            emit RewardAdded(_recipient, ikigaiRewardAmount);
-        }
-    }
-
-    // Admin function to set URI information
+    /**
+     * @notice Set URI information
+     * @param _baseURI Base URI
+     * @param _notRevealedURI Not revealed URI
+     */
     function setURIInfo(string memory _baseURI, string memory _notRevealedURI) external nonReentrant onlyRole(METADATA_ROLE) {
         baseURI = _baseURI;
         notRevealedURI = _notRevealedURI;
     }
 
-    // Admin function to reveal collection
+    /**
+     * @notice Reveal collection
+     * @param _revealed Whether to reveal the collection
+     */
     function revealCollection(bool _revealed) external nonReentrant onlyRole(METADATA_ROLE) {
         revealed = _revealed;
     }
 
-    // Override tokenURI function
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        require(_exists(tokenId), "Token does not exist");
-        
-        if (!revealed) {
-            return notRevealedURI;
-        }
-        
-        // If token has custom URI, return it
-        if (bytes(_tokenURIs[tokenId]).length > 0) {
-            return _tokenURIs[tokenId];
-        }
-        
-        // Otherwise return baseURI + tokenId
-        return string(abi.encodePacked(baseURI, tokenId.toString()));
-    }
-
-    // Allow setting custom URI for specific tokens (for special editions)
+    /**
+     * @notice Set token URI for a specific token
+     * @param tokenId Token ID
+     * @param _tokenURI Token URI
+     */
     function setTokenURI(uint256 tokenId, string memory _tokenURI) external nonReentrant onlyRole(METADATA_ROLE) {
         require(_exists(tokenId), "Token does not exist");
         _tokenURIs[tokenId] = _tokenURI;
     }
 
-    // Enhanced royalty handling
+    /**
+     * @notice Update royalty info
+     * @param _receiver Receiver address
+     * @param _royaltyFeesInBips Royalty fees in basis points
+     */
     function updateRoyaltyInfo(address _receiver, uint96 _royaltyFeesInBips) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
         require(_receiver != address(0), "Invalid receiver address");
         require(_royaltyFeesInBips <= 10000, "Royalty exceeds 100%");
-        _setDefaultRoyaltyInfo(_receiver, _royaltyFeesInBips);
+        royaltyRecipient = _receiver;
+        royaltyBps = _royaltyFeesInBips;
+        _setDefaultRoyalty(_receiver, _royaltyFeesInBips);
     }
 
-    function setTokenRoyalty(
-        uint256 _tokenId,
-        address _receiver,
-        uint96 _royaltyFeesInBips
-    ) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(_exists(_tokenId), "Token does not exist");
-        require(_receiver != address(0), "Invalid receiver address");
-        require(_royaltyFeesInBips <= 10000, "Royalty exceeds 100%");
-        _setTokenRoyalty(_tokenId, _receiver, _royaltyFeesInBips);
+    /**
+     * @notice Set accepted tokens for payment
+     * @param _token Token address
+     * @param _accepted Whether the token is accepted
+     * @param _priceMultiplier Price multiplier (1000 = 1x)
+     */
+    function setAcceptedToken(address _token, bool _accepted, uint256 _priceMultiplier) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_token != address(0), "Invalid token address");
+        require(_priceMultiplier > 0, "Price multiplier must be positive");
+        acceptedTokens[_token] = _accepted;
+        tokenPriceMultipliers[_token] = _priceMultiplier;
+    }
+
+    /**
+     * @notice Get total supply
+     * @return Total supply
+     */
+    function totalSupply() public view returns (uint256) {
+        return _currentIndex;
+    }
+
+    /**
+     * @notice Check if token exists
+     * @param tokenId Token ID
+     * @return Whether token exists
+     */
+    function _exists(uint256 tokenId) internal view returns (bool) {
+        return tokenId < _currentIndex && _owners[tokenId] != address(0);
+    }
+
+    /**
+     * @notice Get token URI
+     * @param tokenId Token ID
+     * @return Token URI
+     */
+    function tokenURI(uint256 tokenId) public view override(ERC721, ERC721URIStorage) returns (string memory) {
+        require(_exists(tokenId), "URI query for nonexistent token");
+        
+        if (!revealed) {
+            return notRevealedURI;
+        }
+        
+        if (bytes(_tokenURIs[tokenId]).length > 0) {
+            return _tokenURIs[tokenId];
+        }
+        
+        return string(abi.encodePacked(baseURI, tokenId.toString()));
+    }
+
+    /**
+     * @notice Get owner of token
+     * @param tokenId Token ID
+     * @return Owner address
+     */
+    function ownerOf(uint256 tokenId) public view override(ERC721) returns (address) {
+        require(_exists(tokenId), "Owner query for nonexistent token");
+        return _owners[tokenId];
+    }
+
+    // Required overrides for ERC721, ERC721Enumerable, and ERC721URIStorage
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId, uint256 batchSize) internal override(ERC721, ERC721Enumerable) {
+        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+    }
+
+    function _burn(uint256 tokenId) internal override(ERC721, ERC721URIStorage) {
+        super._burn(tokenId);
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override(ERC721, ERC721Enumerable, ERC2981, AccessControl) returns (bool) {
+        return super.supportsInterface(interfaceId);
+    }
+
+    // ERC721 initialization function
+    function __ERC721_init(string memory _name, string memory _symbol) internal {
+        // Empty implementation as we're manually setting name and symbol
     }
 } 
