@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/utils/Strings.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import "../interfaces/IBuybackEngine.sol";
+import "./interfaces/IBuybackEngine.sol";
 
 /**
  * @title GenesisNFTStorage
